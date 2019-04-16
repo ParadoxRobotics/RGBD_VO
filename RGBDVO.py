@@ -10,20 +10,22 @@ from matplotlib import pyplot
 import time
 
 # Camera intrinsic parameters
-fx =
-fy =
-cx =
-cy =
+fx = 641.66
+fy = 641.66
+cx = 324.87
+cy = 237.38
+
+MIP = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]])
 
 # Initiate ORB object
-orb = cv2.ORB_create(nfeatures=500, nlevels=3, scoreType=cv2.ORB_HARRIS_SCORE)
+orb = cv2.ORB_create(nfeatures=500, nlevels=3, scoreType=cv2.ORB_FAST_SCORE)
 # Init feature matcher
 matcher = cv2.DescriptorMatcher_create("BruteForce-L1")
 # Init the D435 pipeline capture
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 60)
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 60)
 # start D435
 pipeline.start(config)
 
@@ -64,13 +66,25 @@ while True:
     # make match
     matches = matcher.match(d_ref, d_cur)
     # filter match using SAD
-    good_match = [m for m in matches if abs(kp_ref[m.queryIdx].pt[1] - kp_cur[m.trainIdx].pt[1])<3]
+    good_match = [m for m in matches if np.abs(kp_ref[m.queryIdx].pt[0] - kp_cur[m.trainIdx].pt[0]) < 0.8]
+    good_match = [m for m in good_match if np.abs(kp_ref[m.queryIdx].pt[1] - kp_cur[m.trainIdx].pt[1]) < 0.8]
     # print matches
     img3 = cv2.drawMatches(ref_frame, kp_ref, cur_frame, kp_cur, good_match, None, flags=2)
     cv2.imshow('state', img3)
-    print(cur_depth.shape)
 
     # create 2 points clouds
+    pc_ref = np.zeros((len(good_match),3))
+    pc_cur = np.zeros((len(good_match),3))
+    for id in good_match:
+        # X component
+        pc_ref[id, 0] = kp_ref[m.queryIdx].pt[0] * (ref_depth[kp_ref[m.queryIdx].pt[0], kp_ref[m.queryIdx].pt[1]]/fx)
+        pc_cur[id, 0] = kp_cur[m.trainIdx].pt[0] * (cur_depth[kp_cur[m.trainIdx].pt[0], kp_cur[m.trainIdx].pt[1]]/fx)
+        # Y component
+        pc_ref[id, 1] = kp_ref[m.queryIdx].pt[1] * (ref_depth[kp_ref[m.queryIdx].pt[0], kp_ref[m.queryIdx].pt[1]]/fy)
+        pc_cur[id, 1] = kp_cur[m.trainIdx].pt[1] * (cur_depth[kp_cur[m.trainIdx].pt[0], kp_cur[m.trainIdx].pt[1]]/fy)
+        # Z component
+        pc_ref[id, 2] = ref_depth[kp_ref[m.queryIdx].pt[0], kp_ref[m.queryIdx].pt[1]]
+        pc_cur[id, 2] = cur_depth[kp_cur[m.trainIdx].pt[0], kp_cur[m.trainIdx].pt[1]]
 
     # Inlier detection with RANSAC
 
