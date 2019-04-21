@@ -18,6 +18,11 @@ cy = 237.38
 
 CIP = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]])
 
+# init pose
+H = np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]])
+Rot_pose = H[0:2, 0:2]
+Tr_pose = H[0:2, 3]
+
 # Initiate ORB object
 orb = cv2.ORB_create(nfeatures=1000, nlevels=8, scoreType=cv2.ORB_FAST_SCORE)
 # Init feature matcher
@@ -98,7 +103,10 @@ while True:
 
     # ICP
     T, distances, iterations = icp.icp(pc_cur, pc_ref, tolerance=0.000001)
-    print(T)
+
+    # trajectory calculation
+    Rot_pose = np.dot(T[0:2, 0:2], Rot_pose) # need to be fused with IMU data
+    Tr_pose = Tr_pose + np.dot(Rot_pose, T[0:2, 3])
 
     # update
     ref_frame = cur_frame
