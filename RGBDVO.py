@@ -8,7 +8,7 @@ import imutils
 import pyrealsense2 as rs
 from matplotlib import pyplot as plt
 from matplotlib import pyplot
-import time
+import icp
 
 # Camera intrinsic parameters
 fx = 641.66
@@ -79,17 +79,26 @@ while True:
     img3 = cv2.drawMatchesKnn(ref_frame, kp_ref, cur_frame, kp_cur, good_match_print, None, flags=2)
     cv2.imshow('state', img3)
 
-    # find the 5 best inlier with ransac
+    # create 2 points clouds with 5 random points pc = [x,y,z]
     ref_pts = np.float32([kp_ref[m.queryIdx].pt for m in good_match])
     cur_pts = np.float32([kp_cur[m.trainIdx].pt for m in good_match])
+    pc_ref = np.zeros((len(ref_pts),3))
+    pc_cur = np.zeros((len(cur_pts),3))
 
-    print(cur_pts.shape)
+    for id in range(len(ref_pts)):
+        # z component
+        pc_ref[id, 2] = ref_depth[int(ref_pts[id, 1]), int(ref_pts[id, 0])]*depth_scale
+        pc_cur[id, 2] = cur_depth[int(cur_pts[id, 1]), int(cur_pts[id, 0])]*depth_scale
+        # x component
+        pc_ref[id, 0] = (ref_pts[id, 0]-cx)*(pc_ref[id, 2]/fx)
+        pc_cur[id, 0] = (cur_pts[id, 0]-cx)*(pc_cur[id, 2]/fx)
+        # y component
+        pc_ref[id, 1] = (ref_pts[id, 1]-cy)*(pc_ref[id, 2]/fy)
+        pc_cur[id, 1] = (cur_pts[id, 1]-cy)*(pc_cur[id, 2]/fy)
 
-    # create 2 points clouds with 5  best points pc = [x,y,z]
-    pc_ref = np.zeros((5,3))
-    pc_cur = np.zeros((5,3))
-
-    # local trajectory optimization (5 last pose + keypoint)
+    # ICP
+    T, distances, iterations = icp.icp(pc_cur, pc_ref, tolerance=0.000001)
+    print(T)
 
     # update
     ref_frame = cur_frame
