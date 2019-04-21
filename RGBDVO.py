@@ -2,6 +2,7 @@
 # Author :  MUNCH Quentin 2018/2019
 
 import numpy as np
+from sklearn.neighbors import NearestNeighbors
 import cv2
 import imutils
 import pyrealsense2 as rs
@@ -15,10 +16,10 @@ fy = 641.66
 cx = 324.87
 cy = 237.38
 
-MIP = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]])
+CIP = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]])
 
 # Initiate ORB object
-orb = cv2.ORB_create(nfeatures=500, nlevels=3, scoreType=cv2.ORB_FAST_SCORE)
+orb = cv2.ORB_create(nfeatures=1000, nlevels=8, scoreType=cv2.ORB_FAST_SCORE)
 # Init feature matcher
 matcher = cv2.DescriptorMatcher_create("BruteForce-L1")
 # Init the D435 pipeline capture
@@ -26,8 +27,10 @@ pipeline = rs.pipeline()
 config = rs.config()
 config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 60)
 config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 60)
-# start D435
-pipeline.start(config)
+# start D435 and recover scale
+profile = pipeline.start(config)
+depth_sensor = profile.get_device().first_depth_sensor()
+depth_scale = depth_sensor.get_depth_scale()
 
 # alignement object
 align_to = rs.stream.color
@@ -64,31 +67,29 @@ while True:
     # find keypoints
     kp_cur, d_cur = orb.detectAndCompute(cur_frame, None)
     # make match
-    matches = matcher.match(d_ref, d_cur)
-    # filter match using SAD
-    good_match = [m for m in matches if np.abs(kp_ref[m.queryIdx].pt[0] - kp_cur[m.trainIdx].pt[0]) < 0.8]
-    good_match = [m for m in good_match if np.abs(kp_ref[m.queryIdx].pt[1] - kp_cur[m.trainIdx].pt[1]) < 0.8]
+    matches = matcher.knnMatch(d_ref, d_cur, 2)
+    # filter match using lowe loss
+    good_match = []
+    good_match_print = [] # only fo debug
+    for m,n in matches:
+        if m.distance < 0.45*n.distance:
+            good_match.append(m)
+            good_match_print.append([m])
     # print matches
-    img3 = cv2.drawMatches(ref_frame, kp_ref, cur_frame, kp_cur, good_match, None, flags=2)
+    img3 = cv2.drawMatchesKnn(ref_frame, kp_ref, cur_frame, kp_cur, good_match_print, None, flags=2)
     cv2.imshow('state', img3)
 
-    # create 2 points clouds
-    pc_ref = np.zeros((len(good_match),3))
-    pc_cur = np.zeros((len(good_match),3))
-    for id in good_match:
-        # X component
-        pc_ref[id, 0] = kp_ref[m.queryIdx].pt[0] * (ref_depth[kp_ref[m.queryIdx].pt[0], kp_ref[m.queryIdx].pt[1]]/fx)
-        pc_cur[id, 0] = kp_cur[m.trainIdx].pt[0] * (cur_depth[kp_cur[m.trainIdx].pt[0], kp_cur[m.trainIdx].pt[1]]/fx)
-        # Y component
-        pc_ref[id, 1] = kp_ref[m.queryIdx].pt[1] * (ref_depth[kp_ref[m.queryIdx].pt[0], kp_ref[m.queryIdx].pt[1]]/fy)
-        pc_cur[id, 1] = kp_cur[m.trainIdx].pt[1] * (cur_depth[kp_cur[m.trainIdx].pt[0], kp_cur[m.trainIdx].pt[1]]/fy)
-        # Z component
-        pc_ref[id, 2] = ref_depth[kp_ref[m.queryIdx].pt[0], kp_ref[m.queryIdx].pt[1]]
-        pc_cur[id, 2] = cur_depth[kp_cur[m.trainIdx].pt[0], kp_cur[m.trainIdx].pt[1]]
+    # find the 5 best inlier with ransac
+    ref_pts = np.float32([kp_ref[m.queryIdx].pt for m in good_match])
+    cur_pts = np.float32([kp_cur[m.trainIdx].pt for m in good_match])
 
-    # Inlier detection with RANSAC
+    print(cur_pts.shape)
 
-    # Transformation estimation
+    # create 2 points clouds with 5  best points pc = [x,y,z]
+    pc_ref = np.zeros((5,3))
+    pc_cur = np.zeros((5,3))
+
+    # local trajectory optimization (5 last pose + keypoint)
 
     # update
     ref_frame = cur_frame
