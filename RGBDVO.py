@@ -102,7 +102,7 @@ while True:
     # ICP
     T, distances, iterations = icp.icp(pc_cur, pc_ref, tolerance=0.000001)
     ROT = T[0:3, 0:3]
-    TR = np.array([T[0,3]],[T[1,3]],[T[2,3]])
+    TR = np.array([[T[0,3]],[T[1,3]],[T[2,3]]])
 
     # trajectory calculation
     Rot_pose = np.dot(ROT, Rot_pose) 
