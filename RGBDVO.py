@@ -1,153 +1,187 @@
-# One-file Realsense RGBD Visual Odometry for robotics applications:
-# Author :  MUNCH Quentin 2023
+# NumPy/Python RGBD Visual Odometry for robotics applications:
+# Author :  MUNCH Quentin 2018/2019
+
+"""
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
 
 import numpy as np
+from sklearn.neighbors import NearestNeighbors
 import cv2
 import imutils
 import pyrealsense2 as rs
 from matplotlib import pyplot as plt
+from matplotlib import pyplot
+import icp
 
-# General input Configuration
-H = 480
-W = 640
-# ORB feature extractor init
-ORB = cv2.ORB_create(nfeatures=3000, nlevels=8, scoreType=cv2.ORB_FAST_SCORE)
-print("[I] ORB feature detector")
-# LKT matcher init
-LKT_config = dict(
-    winSize=(25, 25),
-    maxLevel=3,
-    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
-)
-print("[I] KLT initialized")
-# PNP solver init
-pnp_method = cv2.SOLVEPNP_P3P
-pnp_confidence = 0.9999
-pnp_retroprojection_error = 1
-pnp_iteration = 1000
-# Init pose
-rotation_matrix = np.eye(3)
-translation_vector = np.zeros([[0], [0], [0]])
+# use ggplot style for more sophisticated visuals
+plt.style.use("ggplot")
 
-# Init the Realsense pipeline capture
+
+def live_plotter(x_vec, y1_data, line1, identifier="", pause_time=0.1):
+    if line1 == []:
+        # this is the call to matplotlib that allows dynamic plotting
+        plt.ion()
+        fig = plt.figure(figsize=(13, 6))
+        ax = fig.add_subplot(111)
+        # create a variable for the line so we can later update it
+        (line1,) = ax.plot(x_vec, y1_data, "-o", alpha=0.8)
+        # update plot label/title
+        plt.ylabel("Y Label")
+        plt.title("Title: {}".format(identifier))
+        plt.show()
+
+    # after the figure, axis, and line are created, we only need to update the y-data
+    line1.set_ydata(y1_data)
+    # adjust limits if new data goes beyond bounds
+    if np.min(y1_data) <= line1.axes.get_ylim()[0] or np.max(y1_data) >= line1.axes.get_ylim()[1]:
+        plt.ylim([np.min(y1_data) - np.std(y1_data), np.max(y1_data) + np.std(y1_data)])
+    # this pauses the data so the figure/axis can catch up - the amount of pause can be altered above
+    plt.pause(pause_time)
+
+    # return line so we can update it again in the next iteration
+    return line1
+
+
+Rot_pose = np.eye(3)
+Tr_pose = np.array([[0], [0], [0]])
+
+# Initiate ORB object
+orb = cv2.ORB_create(nfeatures=1000, nlevels=8, scoreType=cv2.ORB_FAST_SCORE)
+# Init feature matcher
+matcher = cv2.DescriptorMatcher_create("BruteForce-L1")
+# Init the D435 pipeline capture
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 60)
-config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 60)
-# start Realsense and recover scale
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 60)
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 60)
+# start D435 and recover scale
 profile = pipeline.start(config)
 depth_sensor = profile.get_device().first_depth_sensor()
 depth_scale = depth_sensor.get_depth_scale()
-# align depth camera to the color camera
-alignement = rs.align(rs.stream.color)
-# recover calibration data
-depth_profile = profile.get_stream(rs.stream.depth)
-depth_intrinsics = depth_profile.as_video_stream_profile().get_intrinsics()
-color_profile = profile.get_stream(rs.stream.color)
-color_intrinsics = color_profile.as_video_stream_profile().get_intrinsics()
-# construct intrinsic camera matrix for the depth camera
-fx_depth = depth_intrinsics.fx
-fy_depth = depth_intrinsics.fy
-cx_depth = depth_intrinsics.ppx
-cy_depth = depth_intrinsics.ppy
-depth_intrinsics_matrix = np.array([[fx_depth, 0, cx_depth], [0, fy_depth, cy_depth], [0, 0, 1]])
-# construct intrinsic camera matrix for the color camera
-fx_color = color_intrinsics.fx
-fy_color = color_intrinsics.fy
-cx_color = color_intrinsics.ppx
-cy_color = color_intrinsics.ppy
-color_intrinsics_matrix = np.array([[fx_color, 0, cx_color], [0, fy_color, cy_color], [0, 0, 1]])
-print("[I] Realsense camera initialized")
 
-# flush frame for auto-adjustement
-print("[I] Running auto-adjustement...")
-for i in range(0, 100):
-    # Acquire state
-    ref_state = pipeline.wait_for_frames()
-    # Align the depth frame to color frame
-    ref_aligned_state = alignement.process(ref_state)
-    ref_frame_aligned = ref_aligned_state.get_color_frame()
-    ref_depth_aligned = ref_aligned_state.get_depth_frame()
-print("[I] Auto-adjustement done")
+# alignement object
+align_to = rs.stream.color
+align = rs.align(align_to)
 
-print("[I] Initilize reference and local map")
-# get rectified / aligned depth and color frame
-depth_ref = np.asanyarray(ref_depth_aligned.get_data()) * depth_scale
-frame_ref = cv2.cvtColor(np.asanyarray(ref_frame_aligned.get_data()), cv2.COLOR_BGR2GRAY)
-# extract keypoints
-kpt_ref, des_ref = ORB.detectAndCompute(frame_ref, None)
-# convert keypoint as an array of 2D points and create initial 3D local map
-kpt_ref_filter = []
-keyframe_map = []
-for i in range(len(kpt_ref)):
-    if depth_ref[int(kpt_ref[i].pt[1]), int(kpt_ref[i].pt[0])] != 0.0:
-        # append keypoint and descriptor
-        kpt_ref_filter.append([kpt_ref[i].pt[0], kpt_ref[i].pt[1]])
-        # compute 3D point in the aligned color camera
-        xyz_point = rs.rs2_deproject_pixel_to_point(
-            color_intrinsics,
-            [int(kpt_ref[i].pt[1]), int(kpt_ref[i].pt[0])],
-            depth_ref[int(kpt_ref[i].pt[1]), int(kpt_ref[i].pt[0])],
-        )
-        keyframe_map.append(xyz_point)
-# convert it into arrays
-kpt_ref = np.expand_dims(np.array(kpt_ref_filter), axis=1).astype("float32")  # weird reshaping (n,1,2) dtype=float32
-keyframe_map = np.array(keyframe_map)
+# Recover calibration intrinsics
+pr = profile.get_stream(rs.stream.depth)
+intrinsics = pr.as_video_stream_profile().get_intrinsics()
 
-# main loop
-print("[I] Local map initialized. Starting stereo odometry pipeline !")
+# Camera intrinsic parameters
+fx = intrinsics.fx
+fy = intrinsics.fx
+cx = intrinsics.ppx
+cy = intrinsics.ppy
+
+CIP = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+
+# Acquire state
+ref_state = pipeline.wait_for_frames()
+# Align the depth frame to color frame
+ref_aligned_state = align.process(ref_state)
+ref_frame_aligned = ref_aligned_state.get_color_frame()
+ref_depth_aligned = ref_aligned_state.get_depth_frame()
+# get reference RGB state
+ref_frame = np.asanyarray(ref_frame_aligned.get_data())
+ref_frame = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
+# get reference Depth state
+ref_depth = np.asanyarray(ref_depth_aligned.get_data())
+
+# find keypoints
+kp_ref, d_ref = orb.detectAndCompute(ref_frame, None)
+
+trajectory_x = []
+trajectory_y = []
+trajectory_z = []
+
 while True:
-    # Acquire state
+    # Acquire new state
     cur_state = pipeline.wait_for_frames()
     # Align the depth frame to color frame
-    cur_aligned_state = alignement.process(cur_state)
+    cur_aligned_state = align.process(cur_state)
     cur_frame_aligned = cur_aligned_state.get_color_frame()
     cur_depth_aligned = cur_aligned_state.get_depth_frame()
-    # get rectified / aligned depth and color frame
-    depth_cur = np.asanyarray(cur_depth_aligned.get_data()) * depth_scale
-    frame_cur = cv2.cvtColor(np.asanyarray(cur_frame_aligned.get_data()), cv2.COLOR_BGR2GRAY)
+    # new RGB state
+    cur_frame = np.asanyarray(cur_frame_aligned.get_data())
+    cur_frame = cv2.cvtColor(cur_frame, cv2.COLOR_BGR2GRAY)
+    # new Depth state
+    cur_depth = np.asanyarray(cur_depth_aligned.get_data())
 
-    # compute keypoints displacement using KLT tracker
-    kpt_cur_pred, status, error = cv2.calcOpticalFlowPyrLK(frame_ref, frame_cur, kpt_ref, None, **LKT_config)
-    kpt_ref_pred, status, error = cv2.calcOpticalFlowPyrLK(frame_cur, frame_ref, kpt_cur_pred, None, **LKT_config)
-    # compute distance point2point
-    dist = abs(kpt_ref - kpt_ref_pred).reshape(-1, 2).max(-1)
-    matched_kpt = dist < 1
-    # remove unmatched keypoints
-    matched_kpt_ref = []
-    matched_kpt_cur = []
-    matched_keyframe_map = []
-    for i, matched in enumerate(matched_kpt):
-        if matched:
-            matched_kpt_ref.append(kpt_ref[i])
-            matched_kpt_cur.append(kpt_cur_pred[i])
-            matched_keyframe_map(keyframe_map[i])
-    # convert it into arrays
-    matched_kpt_ref = np.array(matched_kpt_ref)
-    matched_kpt_cur = np.array(matched_kpt_cur)
-    # update keyframe map
-    keyframe_map = np.array(matched_keyframe_map)
+    # find keypoints
+    kp_cur, d_cur = orb.detectAndCompute(cur_frame, None)
+    # make match
+    matches = matcher.knnMatch(d_ref, d_cur, 2)
+    # filter match using lowe loss
+    good_match = []
+    good_match_print = []  # only fo debug
+    for m, n in matches:
+        if m.distance < 0.45 * n.distance:
+            good_match.append(m)
+            good_match_print.append([m])
 
-    # compute 3D pose from estimated current keypoint and world coordinate keyframe local map
-    inliers, rotation_vector, translation_vector, idxPose = cv2.solvePnPRansac(
-        keyframe_map,
-        matched_kpt_cur,
-        color_intrinsics_matrix,
-        None,
-        iterationsCount=pnp_iteration,
-        reprojectionError=pnp_retroprojection_error,
-        confidence=pnp_confidence,
-        flags=pnp_method,
-    )
-    # use Rodrigues formula (SO3) to obtain rotational matrix
-    rotation_matrix, jacobian = cv2.Rodrigues(rotation_vector)
-    # compute 3D pose in world coordinate
-    translation_vector = -rotation_matrix.T @ translation_vector
-    rotation_matrix = rotation_matrix.T
-    # compute ratio and scale from the number of matched points and the current pose
-    matched_point_ratio = len(idxPose) / len(keyframe_map)
-    scale = np.linalg.norm(translation_vector)
+    if len(good_match) > 10:
+        # print matches
+        img3 = cv2.drawMatchesKnn(ref_frame, kp_ref, cur_frame, kp_cur, good_match_print, None, flags=2)
+        cv2.imshow("state", img3)
 
-    # project keyframe local map from camera pose OR update keyframe using the current frame / depth
+        # create 2 points clouds with 5 random points pc = [x,y,z]
+        ref_pts = np.float32([kp_ref[m.queryIdx].pt for m in good_match])
+        cur_pts = np.float32([kp_cur[m.trainIdx].pt for m in good_match])
+        pc_ref = np.zeros((len(ref_pts), 3))
+        pc_cur = np.zeros((len(cur_pts), 3))
 
-    exit()
+        for id in range(len(ref_pts)):
+            # compute depth
+            depth_cur = cur_depth[int(cur_pts[id, 1]), int(cur_pts[id, 0])] * depth_scale
+            depth_ref = ref_depth[int(ref_pts[id, 1]), int(ref_pts[id, 0])] * depth_scale
+            # add to point cloud only if the depth is non zero
+            if depth_cur != 0 and depth_ref != 0:
+                # z component
+                pc_ref[id, 2] = depth_ref
+                pc_cur[id, 2] = depth_cur
+                # x component
+                pc_ref[id, 0] = (ref_pts[id, 0] - cx) * (pc_ref[id, 2] / fx)
+                pc_cur[id, 0] = (cur_pts[id, 0] - cx) * (pc_cur[id, 2] / fx)
+                # y component
+                pc_ref[id, 1] = (ref_pts[id, 1] - cy) * (pc_ref[id, 2] / fy)
+                pc_cur[id, 1] = (cur_pts[id, 1] - cy) * (pc_cur[id, 2] / fy)
+
+        # ICP
+        T, distances, iterations = icp.icp(pc_cur, pc_ref, tolerance=0.000001)
+        ROT = T[0:3, 0:3]
+        TR = np.array([[T[0, 3]], [T[1, 3]], [T[2, 3]]])
+
+        # trajectory calculation
+        Rot_pose = np.dot(ROT, Rot_pose)
+        Tr_pose = Tr_pose + np.dot(Rot_pose, TR)
+        trajectory_x.append(Tr_pose[0, 0])
+        trajectory_y.append(Tr_pose[1, 0])
+        trajectory_z.append(Tr_pose[2, 0])
+
+        if cv2.waitKey(1) == 27:
+            break
+
+    # update keypoint
+    ref_frame = cur_frame
+    ref_depth = cur_depth
+    kp_ref = kp_cur
+    d_ref = d_cur
+
+cv2.destroyAllWindows()
+pipeline.stop()
+
+fig = plt.figure()
+ax = fig.add_subplot(projection="3d")
+ax.scatter(trajectory_x, trajectory_y, trajectory_z)
+
+plt.show()
